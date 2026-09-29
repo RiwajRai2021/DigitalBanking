@@ -1,0 +1,267 @@
+Project: a distributed core-banking platform (call it something like Ledgerline or Meridian Bank — name it once you start building)
+
+The pitch: a small but architecturally real digital bank — not a demo, a system. Customers manage accounts and move money; bank staff monitor transactions and investigate flags; every action is provably auditable. The point isn't feature count, it's that every hard part of "real banking software" is actually solved, not simulated.
+
+Two user roles, two experiences:
+
+Customer — the dashboard we just mockup'd: account balances, transaction history, transfers, deposit/withdrawal.
+Compliance/teller staff — a separate gated view: cross-account monitoring, flagged-transaction queue, audit trail search. This is the view that proves the RBAC work is real, not decorative.
+
+Four backend services, talking over Kafka, not direct calls:
+
+Account service — owns identity-to-account mapping, balances as a read-projection (never the source of truth).
+Ledger service — the actual source of truth. Double-entry: every transaction writes a paired debit/credit, the system enforces they always net to zero. Concurrency-safe transfers via row-level or optimistic locking, so two simultaneous withdrawals can't double-spend.
+Payment orchestration service — handles the multi-step transfer/payment flow as a saga (hold funds → validate → post → confirm, with compensating rollback on failure), and idempotency keys so a retried request never double-processes.
+Audit & fraud service (your addition, not from either course) — an append-only log of every read/write on every account, plus a lightweight rules engine scoring transactions for velocity or amount anomalies.
+
+Identity & security: Auth0 for authentication (JWT-based, both user-facing and service-to-service), role-based authorization gating what each service exposes to whom.
+
+Frontend: React SPA talking to an API gateway, JWT-authenticated, with the two role-specific views above.
+
+Delivery pipeline: everything Dockerized, GitHub Actions running tests and building images on every commit, deployed to AWS (EC2 or EKS), S3 for document/statement storage, SMTP for transaction and security notifications. This is a real CI/CD pipeline you can point to, not "I ran it locally."
+
+What actually gets demoed in an interview:
+
+A live URL, not just a GitHub link
+A transfer that visibly triggers ledger entries, a Kafka event, an audit log line, and an email notification, end to end
+A README opening with the architecture diagram, explaining why double-entry and concurrency locking exist, not just that they do
+
+What it replaces on your resume: the three CRUD apps collapse into one line — a distributed banking platform with ledger integrity, event-driven orchestration, RBAC, and audit logging, deployed via CI/CD on AWS. That's the sentence that gets you past the resume screen at the DMV shops that actually build this kind of software for a living.
+
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+Meridian Bank — Complete Build Outline (Top to Bottom)
+
+A distributed core-banking platform: customers manage accounts and move money, compliance staff monitor transactions and investigate flags, and every action is provably auditable. Built on two Udemy courses for the foundation, extended with original architecture for the parts that make it a real system rather than a tutorial.
+
+Course A — Building Real-World Banking Systems with Spring Boot (Spring Boot 3, Kafka, Auth0, PostgreSQL, microservices)
+Course B — Full-Stack FinTech App: Spring Boot 4, React, DevOps & CI/CD (React SPA, JWT, Docker, GitHub Actions, AWS S3, SMTP)
+Custom — saga orchestration, idempotency, concurrency testing, tamper-evident audit log, fraud rules, dual-role RBAC enforcement
+Phase 0 — Define the Functional MVP
+Write the exact user journeys: customer opens account → deposits → transfers → views history; compliance staff reviews flagged transaction → drills into audit trail.
+List the services and, for each, the 3–5 endpoints/events it owns — nothing else yet.
+Write an explicit not-building list (e.g. no multi-currency, no external payment rails, no interest accrual in v1) to prevent scope creep later.
+Commit this as ARCHITECTURE.md before writing any code.
+
+Checkpoint: one-page doc with services, endpoints/events, and out-of-scope list, committed to the repo.
+
+Source: Course A's own opening step.
+
+Phase 1 — Core Backend Services
+Spring Boot 3 project setup via Spring Initializr; PostgreSQL as the datastore.
+account-service — owns identity-to-account mapping; balance is a read projection only, never written directly.
+ledger-service — the source of truth. Every transaction writes a paired debit/credit; enforce they always net to zero.
+REST APIs for account management and transactions; Spring Data JPA for persistence; secure service boundaries between services.
+
+Checkpoint: both services run locally, double-entry invariant holds under a basic unit test.
+
+Source: Course A.
+
+Phase 2 — Concurrency-Safe Transfers
+Add locking to the transfer path — pick one:
+Optimistic: version column on account/ledger rows, retry on conflict.
+Pessimistic: SELECT ... FOR UPDATE on both accounts, always locked in a consistent order (e.g. lower account ID first) to avoid deadlock.
+Write an integration test that fires many concurrent transfer requests at the same account and asserts the ending balance is exactly correct with zero lost updates. Run it repeatedly, not once.
+
+Checkpoint: concurrency test passes reliably across 10+ runs; you can explain why the chosen locking strategy prevents double-spending.
+
+Source: Custom — do this before building anything further on top of the ledger.
+
+Phase 3 — Kafka Event-Driven Wiring
+Kafka producers/consumers per Course A's pattern.
+account-service publishes account-created / balance-changed events.
+ledger-service publishes transaction-posted events.
+Services consume relevant events to keep their own read models in sync — no direct service-to-service REST calls for this.
+
+Checkpoint: kill and restart one service while the other runs — events queue in Kafka and process on reconnect with no data loss.
+
+Source: Course A.
+
+Phase 4 — Auth0 + JWT + Role-Based Authorization
+Configure Auth0 as identity provider; issue JWTs with a role claim (customer or compliance_staff).
+Implement JWT auth for user-facing requests and service-to-service calls.
+Gate every endpoint by role at the Spring Security filter level — not just hidden in a UI.
+Test: hit a compliance-only endpoint with a customer-role token and confirm a 403.
+
+Checkpoint: two auth test collections (customer token, compliance token) — each correctly allowed/denied on every endpoint.
+
+Source: Course A (auth setup) + custom (the enforcement test).
+
+Phase 5 — Idempotency Keys
+Require a unique client-generated idempotency key on every transfer/payment request.
+Persist processed keys with their result; a repeated key returns the original result instead of re-executing.
+Test: submit the identical request twice with the same key, assert money only moved once.
+
+Checkpoint: duplicate-submission test passes.
+
+Source: Custom.
+
+Phase 6 — Payment Orchestration Saga
+
+Build a dedicated payment-orchestration-service coordinating transfers as an explicit multi-step saga:
+
+Hold — reserve funds on the source account without debiting.
+Validate — run fraud/business-rule checks (wired to Phase 9 once it exists).
+Post — write the atomic debit/credit pair to the ledger.
+Confirm — release the hold, mark saga complete.
+Compensate — on failure at any step, release the hold and mark failed, leaving no partial state.
+Persist saga state (HELD, VALIDATING, POSTED, CONFIRMED, FAILED, COMPENSATED) so a crashed saga can be recovered or reconciled.
+Test: force a mid-saga failure, assert the hold was released and no ledger entry exists.
+
+Checkpoint: happy-path saga test passes end to end; failure-path test proves compensation actually reverses state.
+
+Source: Custom — the largest net-new piece.
+
+Phase 7 — React Frontend (Customer View)
+Build the SPA: account dashboard, balances, transaction history.
+Deposit, withdrawal, and transfer forms wired to the backend APIs.
+Connect to the secured backend using the JWT auth pattern.
+
+Checkpoint: customer can log in, view balances/history, and complete a transfer end to end through the UI.
+
+Source: Course B.
+
+Phase 8 — Dual-Role Frontend: Compliance View + Server-Side Enforcement
+Add a separate compliance route/section: cross-account monitoring, flagged-transaction queue, audit trail search.
+Gate it client-side (hidden from customer-role users) and server-side (a tampered customer JWT hitting a compliance endpoint still gets 403, per Phase 4).
+Test: manually alter a JWT client-side to try to reach the compliance view — confirm the backend still rejects it.
+
+Checkpoint: logging in as each role shows a genuinely different app; client-side tampering doesn't bypass server enforcement.
+
+Source: Custom, extending Course B's frontend.
+
+Phase 9 — Audit & Fraud Service
+New service, append-only audit log: every read/write on every account writes an entry.
+Hash-chaining — each entry stores a hash of the previous entry's content, so retroactive edits break the chain. Write a verification job that walks the chain and reports the first broken link.
+Fraud rules engine — velocity check (too many transactions in a window) and amount-anomaly check (transaction far outside historical range).
+Flagged transactions surface in the Phase 8 compliance queue.
+
+Checkpoint: tampering with one row directly in the database is caught by the chain-verification job at the exact point of tampering; test fraud rules trigger correctly on crafted data.
+
+Source: Custom — your original addition, not from either course.
+
+Phase 10 — Wire Fraud Validation into the Saga
+Connect Phase 6's "Validate" step to Phase 9's fraud rules (synchronous call or a quick Kafka round-trip).
+A transaction that trips a fraud rule gets held/flagged by the saga instead of posting, and appears in the compliance queue.
+
+Checkpoint: a crafted fraud-triggering transaction is stopped by the saga and visible to compliance staff, not silently posted.
+
+Source: Custom — closes the loop between orchestration and fraud detection.
+
+Phase 11 — Containerization
+Dockerfiles for each backend service and the React frontend.
+docker-compose.yml bringing up all services, Kafka, Postgres, and the frontend with one command.
+
+Checkpoint: fresh clone, one docker-compose up, full system runs locally.
+
+Source: Course B.
+
+Phase 12 — CI/CD Pipeline
+GitHub Actions workflow: run tests (including Phase 2 concurrency and Phase 5 idempotency tests) → build images → push to registry → deploy.
+Zero-downtime deployment pattern from Course B.
+
+Checkpoint: a commit to main triggers the pipeline and deploys automatically; a failing test blocks deployment.
+
+Source: Course B.
+
+Phase 13 — Cloud Integration
+AWS S3 for statement/document storage.
+SMTP service for transaction and security email notifications.
+Deploy via Docker Compose on a single EC2 instance for the live demo (cheaper and just as demonstrable as a running cluster).
+Write Kubernetes manifests/Helm chart and include them in the repo as "designed for k8s deployment" — no need to pay to keep a live EKS cluster running for a portfolio piece.
+
+Checkpoint: deployed system is reachable over HTTPS, statements land in S3, and a test transaction triggers a real email notification.
+
+Source: Course B (S3/SMTP/deploy) + custom (EC2-over-EKS scope decision).
+
+Full pacing summary
+Phase	Focus	Source	Rough effort
+0	MVP definition	Course A	1 evening
+1	Core backend services	Course A	1 week
+2	Concurrency-safe transfers + test	Custom	3–5 days
+3	Kafka wiring	Course A	3–5 days
+4	Auth0/JWT/RBAC	Course A + Custom	3–5 days
+5	Idempotency keys	Custom	2–3 days
+6	Payment orchestration saga	Custom	1–2 weeks
+7	React frontend (customer)	Course B	1 week
+8	Compliance view + enforcement	Custom	3–5 days
+9	Audit & fraud service	Custom	1 week
+10	Wire fraud into saga	Custom	2–3 days
+11	Docker	Course B	2–3 days
+12	CI/CD	Course B	2–3 days
+13	AWS + SMTP + deploy	Course B + Custom	3–5 days
+
+Total: roughly 9–12 weeks at a steady part-time pace, less if full-time.
+
+Final repo structure
+meridian-bank/
+├── ARCHITECTURE.md
+├── account-service/
+├── ledger-service/                    (with concurrency locking + tests)
+├── payment-orchestration-service/     (saga, idempotency)
+├── audit-fraud-service/               (hash-chained log, rules engine)
+├── frontend/                          (customer + compliance views)
+├── docker-compose.yml
+├── k8s/                                (manifests, not necessarily deployed live)
+└── .github/workflows/
+How to talk about this build
+
+"I used structured courses to build the core banking backend, Kafka event wiring, Auth0 security, React frontend, and CI/CD pipeline quickly and correctly, then designed and built the payment saga, idempotency handling, concurrency-tested locking, and a tamper-evident audit/fraud service myself on top of that foundation."
+
+That's accurate, it's defensible under follow-up questions, and it shows the exact judgment employers want to see: move fast on solved problems, slow down and design carefully on the hard ones.
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+Yes, that's exactly the right plan. To spell it out clearly:
+
+The order
+Course A (building-real-world-banking-systems-with-spring-boot) — complete this fully first. This is your backend: account service, ledger service, Kafka event wiring, Auth0/JWT security, role-based authorization.
+Custom additions, right after Course A, before Course B:
+Concurrency-safe transfers + a real concurrent-load test
+Idempotency keys on the transfer endpoint
+The payment orchestration saga (hold → validate → post → confirm → compensate)
+Course B (full-stack-fintech-app-spring-boot-4-react-and-aws-cicd) — complete this second. React frontend, Docker, GitHub Actions CI/CD, AWS S3, SMTP.
+Custom additions, after Course B:
+Split the frontend into the compliance view + enforce it server-side
+Build the audit & fraud service with the hash-chained log
+Wire the fraud rules into the saga's validate step
+
+That's the full path, and it's exactly what's laid out phase-by-phase in the complete build outline document from earlier — Course A covers Phases 0–1, 3–4; your custom work covers Phases 2, 5–6; Course B covers Phases 7, 11–13; and the remaining custom work covers Phases 8–10.
+
+One practical note as you actually start: Course A says explicitly it isn't a Spring Boot fundamentals course — it assumes you're already comfortable with Spring Boot before starting. If any of the basics feel shaky in the first few lectures, that's worth knowing early rather than getting stuck mid-course.
+
+Ready to start Course A? If you want, I can help you set up the repo structure and ARCHITECTURE.md (Phase 0) before you even open the first lecture, so you're not scrambling to organize things once the course starts moving fast.
+
+++++++++++++++++++++++++++++++++++
+
+Yes — the phased sequencing I just laid out is meant to replace the order, not the content, of your original plan. Nothing from your first message needs to be dropped; you're still building all four services, Auth0, Kafka, the two UIs, CI/CD to AWS, S3, SMTP. The only change is when each piece gets built, so you always have something working instead of everything half-done at once.
+
+Here's how the original feature list maps onto the phases:
+
+Phase 1 — Ledger service
+From your original plan: "Ledger service — the actual source of truth... concurrency-safe transfers." Build this exactly as originally scoped. No Kafka involvement yet — just get the invariants and locking right in isolation with tests.
+
+Phase 2 — Account service + Kafka
+From your original plan: "Account service — owns identity-to-account mapping, balances as a read-projection." This is also where Kafka enters, exactly as you originally described — Ledger emits events, Account consumes them.
+
+Phase 3 — API gateway + React SPA (customer view) + Auth0
+From your original plan: "Frontend: React SPA talking to an API gateway, JWT-authenticated" and "Auth0 for authentication." Build the customer dashboard from your earlier mockup here, wired to real JWT auth. This is also a natural point to stand up your first GitHub Actions pipeline and get a live URL on AWS (EC2 is fine to start) — so "live URL" isn't a Phase 6 scramble, it's established early and just keeps working as you add services.
+
+Phase 4 — Audit & fraud service
+From your original plan, unchanged: append-only log, rules engine for velocity/amount anomalies. Consumes Kafka events from Ledger (and ideally Account) as originally scoped.
+
+Phase 5 — Payment orchestration service
+From your original plan: "hold funds → validate → post → confirm, with compensating rollback... idempotency keys." Built last because it depends on Ledger and Account already existing and being stable.
+
+Phase 6 — Staff/compliance view
+From your original plan: "cross-account monitoring, flagged-transaction queue, audit trail search." This is the second RBAC-gated frontend, built once Audit and Payment orchestration exist to query.
+
+Woven throughout, not a separate phase:
+
+S3 for statements — bolt on once Ledger has real transaction history to export (fits naturally after Phase 1–2)
+SMTP notifications — bolt on once Payment orchestration exists, since "transfer confirmed" is the natural trigger email (fits after Phase 5)
+GitHub Actions — start this in Phase 3 with one service, then just add each new service's build/test job as you add the service, rather than building the whole pipeline upfront for services that don't exist yet
+
+So the resume sentence you wrote at the start stays fully intact — you're just derisking the order you build it in. The README's "why double-entry, why locking" story also gets better this way, because you'll have actually hit the bugs those decisions prevent, in Phase 1, before anything else depended on them.
